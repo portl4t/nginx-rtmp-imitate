@@ -28,6 +28,9 @@ static char *ngx_rtmp_live_set_msec_slot(ngx_conf_t *cf, ngx_command_t *cmd,
 static void ngx_rtmp_live_start(ngx_rtmp_session_t *s);
 static void ngx_rtmp_live_stop(ngx_rtmp_session_t *s);
 
+static void ngx_rtmp_live_send_cached_frames(ngx_rtmp_session_t *s);
+static void ngx_rtmp_imitate_send(ngx_event_t *wev);
+
 
 static ngx_command_t  ngx_rtmp_live_commands[] = {
 
@@ -108,6 +111,13 @@ static ngx_command_t  ngx_rtmp_live_commands[] = {
       offsetof(ngx_rtmp_live_app_conf_t, idle_timeout),
       NULL },
 
+    { ngx_string("imitate_fname"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_live_app_conf_t, imitate_fname),
+      NULL },
+
       ngx_null_command
 };
 
@@ -183,6 +193,7 @@ ngx_rtmp_live_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->publish_notify, prev->publish_notify, 0);
     ngx_conf_merge_value(conf->play_restart, prev->play_restart, 0);
     ngx_conf_merge_value(conf->idle_streams, prev->idle_streams, 1);
+    ngx_conf_merge_str_value(conf->imitate_fname, prev->imitate_fname, "");
 
     conf->pool = ngx_create_pool(4096, &cf->cycle->new_log);
     if (conf->pool == NULL) {
@@ -191,6 +202,25 @@ ngx_rtmp_live_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
 
     conf->streams = ngx_pcalloc(cf->pool,
             sizeof(ngx_rtmp_live_stream_t *) * conf->nbuckets);
+
+#define MAX_IMITATE_BUF_LEN     (30 * 1024 * 1024)
+
+    conf->imitate_flen = 0;
+    conf->imitate_buf = NULL;
+
+    if (conf->imitate_fname.len > 0) {
+        conf->imitate_buf = malloc(MAX_IMITATE_BUF_LEN);
+
+        FILE *rfp = fopen(conf->imitate_fname.data, "rb");
+        if (rfp != NULL) {
+            conf->imitate_flen = fread(conf->imitate_buf, 1, MAX_IMITATE_BUF_LEN, rfp);
+            fclose(rfp);
+
+        } else {
+            free(conf->imitate_buf);
+            conf->imitate_buf = NULL;
+        }
+    }
 
     return NGX_CONF_OK;
 }
@@ -1106,10 +1136,85 @@ ngx_rtmp_live_play(ngx_rtmp_session_t *s, ngx_rtmp_play_t *v)
         ngx_rtmp_send_status(s, "NetStream.Play.Start",
                              "status", "Start live");
         ngx_rtmp_send_sample_access(s);
+
+        // send video data to player
+        if (lacf->imitate_flen > 0) {
+            ngx_rtmp_live_send_cached_frames(s);
+        }
     }
 
 next:
     return next_play(s, v);
+}
+
+static void
+ngx_rtmp_live_send_cached_frames(ngx_rtmp_session_t *s)
+{
+    u_char              stream_begin[18] = {2,0,0,0,0,0,6,4,0,0,0,0,0,0,0,0,0,1};
+    ngx_connection_t    *c;
+
+    c = s->connection;
+    c->write->handler = ngx_rtmp_imitate_send;
+
+    // send stream begin
+    c->send(c, stream_begin, sizeof(stream_begin));
+
+    // send video
+    ngx_rtmp_imitate_send(s->connection->write);
+}
+
+static void
+ngx_rtmp_imitate_send(ngx_event_t *wev)
+{
+    ngx_connection_t           *c;
+    ngx_rtmp_session_t         *s;
+    ngx_int_t                   n;
+    ngx_rtmp_live_app_conf_t   *lacf;
+
+    c = wev->data;
+    s = c->data;
+
+    if (c->destroyed) {
+        return;
+    }
+
+    if (wev->timedout) {
+        ngx_log_error(NGX_LOG_INFO, c->log, NGX_ETIMEDOUT,
+                "client timed out");
+        c->timedout = 1;
+        ngx_rtmp_finalize_session(s);
+        return;
+    }
+
+    if (wev->timer_set) {
+        ngx_del_timer(wev);
+    }
+
+    lacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_live_module);
+
+    while (s->cur_pos < lacf->imitate_flen) {
+        n = c->send(c, lacf->imitate_buf + s->cur_pos, lacf->imitate_flen - s->cur_pos);
+
+        if (n == NGX_AGAIN || n == 0) {
+            ngx_add_timer(c->write, s->timeout);
+            if (ngx_handle_write_event(c->write, 0) != NGX_OK) {
+                ngx_rtmp_finalize_session(s);
+            }
+            return;
+        }
+
+        if (n < 0) {
+            ngx_rtmp_finalize_session(s);
+            return;
+        }
+
+        s->cur_pos += n;
+        fprintf(stderr, "cur_pos = %d, total = %d\n", s->cur_pos, lacf->imitate_flen);
+    }
+
+    if (wev->active) {
+        ngx_del_event(wev, NGX_WRITE_EVENT, 0);
+    }
 }
 
 

@@ -265,6 +265,9 @@ typedef struct {
     unsigned                out_buffer:1;
     size_t                  out_queue;
     size_t                  out_cork;
+
+    ngx_int_t               cur_pos;
+
     ngx_chain_t            *out[0];
 } ngx_rtmp_session_t;
 

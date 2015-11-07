@@ -72,6 +72,11 @@ typedef struct {
     ngx_flag_t                          play_restart;
     ngx_flag_t                          idle_streams;
     ngx_msec_t                          buflen;
+
+    ngx_str_t                           imitate_fname;
+    u_char                             *imitate_buf;
+    ngx_int_t                           imitate_flen;
+
     ngx_pool_t                         *pool;
     ngx_rtmp_live_stream_t             *free_streams;
 } ngx_rtmp_live_app_conf_t;
