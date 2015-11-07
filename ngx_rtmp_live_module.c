@@ -211,7 +211,7 @@ ngx_rtmp_live_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     if (conf->imitate_fname.len > 0) {
         conf->imitate_buf = malloc(MAX_IMITATE_BUF_LEN);
 
-        FILE *rfp = fopen(conf->imitate_fname.data, "rb");
+        FILE *rfp = fopen((char*)conf->imitate_fname.data, "rb");
         if (rfp != NULL) {
             conf->imitate_flen = fread(conf->imitate_buf, 1, MAX_IMITATE_BUF_LEN, rfp);
             fclose(rfp);
@@ -1209,7 +1209,7 @@ ngx_rtmp_imitate_send(ngx_event_t *wev)
         }
 
         s->cur_pos += n;
-        fprintf(stderr, "cur_pos = %d, total = %d\n", s->cur_pos, lacf->imitate_flen);
+        fprintf(stderr, "cur_pos = %d, total = %d\n", (int)s->cur_pos, (int)lacf->imitate_flen);
     }
 
     if (wev->active) {
